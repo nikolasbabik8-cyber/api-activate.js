@@ -1,59 +1,73 @@
-const { createClient } = require('@supabase/supabase-js');
+import { createClient } from '@supabase/supabase-js';
 
-module.exports = async (req, res) => {
-    // Only allow POST requests
-    if (req.method !== 'POST') {
-        return res.status(405).json({ success: false, message: 'Method not allowed' });
-    }
+const supabase = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_SERVICE_ROLE_KEY
+);
 
+export default async function handler(req, res) {
+  console.log("--- NEW ACTIVATION REQUEST ---");
+  console.log("Method:", req.method);
+  console.log("Raw req.body:", req.body);
+
+  if (req.method !== 'POST') {
+    return res.status(405).json({ valid: false, debug: "Method not allowed" });
+  }
+
+  // Parse body if WinHTTP sent it as a raw string
+  let body = req.body;
+  if (typeof body === 'string') {
     try {
-        // Initialize Supabase inside the handler to prevent cold-start crashes
-        const supabaseUrl = process.env.SUPABASE_URL;
-        const supabaseKey = process.env.SUPABASE_KEY;
-
-        if (!supabaseUrl || !supabaseKey) {
-            return res.status(500).json({ success: false, message: 'Missing environment variables on server.' });
-        }
-
-        const supabase = createClient(supabaseUrl, supabaseKey);
-
-        // Parse request body safely
-        const body = typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
-        const { key, hwid } = body || {};
-
-        if (!key || !hwid) {
-            return res.status(400).json({ success: false, message: 'Missing key or hwid parameter' });
-        }
-
-        // Query database for the key
-        const { data: row, error } = await supabase
-            .from('licenses')
-            .select('*')
-            .eq('key_string', key)
-            .single();
-
-        if (error || !row) {
-            return res.json({ success: false, message: 'Invalid license key.' });
-        }
-
-        // Check HWID binding
-        if (row.hwid && row.hwid !== hwid) {
-            return res.json({ success: false, message: 'HWID mismatch! Key locked to another machine.' });
-        }
-
-        // Bind HWID on first use
-        if (!row.hwid) {
-            await supabase
-                .from('licenses')
-                .update({ hwid: hwid, status: 'Active' })
-                .eq('key_string', key);
-
-            return res.json({ success: true, message: 'Activation successful!' });
-        }
-
-        return res.json({ success: true, message: 'Welcome back!' });
-
-    } catch (err) {
-        return res.status(500).json({ success: false, message: err.message });
+      body = JSON.parse(body);
+    } catch (e) {
+      console.log("JSON Parse Error:", e.message);
     }
-};
+  }
+
+  const { key, hwid } = body || {};
+  console.log("Extracted Key:", key);
+  console.log("Extracted HWID:", hwid);
+
+  if (!key || !hwid) {
+    return res.status(200).json({ valid: false, debug: "Missing key or hwid in payload" });
+  }
+
+  // Query Supabase
+  const { data: license, error: fetchError } = await supabase
+    .from('Licenses')
+    .select('*')
+    .eq('key_string', key)
+    .single();
+
+  console.log("Supabase Fetch Result:", license);
+  console.log("Supabase Fetch Error:", fetchError);
+
+  if (fetchError || !license) {
+    return res.status(200).json({ valid: false, debug: "Key not found in database", dbError: fetchError });
+  }
+
+  // Handle Unused Key
+  if (license.status === 'Unused') {
+    const { data: updateData, error: updateError } = await supabase
+      .from('Licenses')
+      .update({ status: 'Active', hwid: hwid })
+      .eq('key_string', key)
+      .select();
+
+    console.log("Update Result:", updateData);
+    console.log("Update Error:", updateError);
+
+    if (updateError) {
+      return res.status(200).json({ valid: false, debug: "Database update failed", updateError });
+    }
+
+    return res.status(200).json({ valid: true });
+  }
+
+  // Handle Active Key
+  if (license.status === 'Active' && license.hwid === hwid) {
+    return res.status(200).json({ valid: true });
+  }
+
+  return res.status(200).json({ valid: false, debug: "HWID mismatch or status invalid" });
+}
